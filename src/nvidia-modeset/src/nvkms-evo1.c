@@ -32,6 +32,7 @@
 #include "nvkms-evo1.h"
 #include "nvkms-prealloc.h"
 #include "nvkms-utils.h"
+#include "nvos.h"
 
 #include "hdmi_spec.h"
 
@@ -490,9 +491,16 @@ static NvBool GetChannelState(NVDevEvoPtr pDevEvo,
                          NV5070_CTRL_CMD_GET_CHANNEL_INFO,
                          &info, sizeof(info));
     if (ret != NVOS_STATUS_SUCCESS) {
-        nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
-                    "Failed to query display engine channel state: 0x%08x:%d:%d:0x%08x",
-                    pChan->hwclass, pChan->instance, sd, ret);
+        /*
+         * When the GPU is lost (e.g., Thunderbolt/eGPU hot-unplug),
+         * suppress the error log to avoid flooding dmesg. The callers
+         * will handle the failure appropriately.
+         */
+        if (ret != NVOS_STATUS_ERROR_GPU_IS_LOST) {
+            nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
+                        "Failed to query display engine channel state: 0x%08x:%d:%d:0x%08x",
+                        pChan->hwclass, pChan->instance, sd, ret);
+        }
         return FALSE;
     }
 

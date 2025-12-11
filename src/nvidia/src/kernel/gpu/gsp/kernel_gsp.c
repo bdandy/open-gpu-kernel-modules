@@ -150,6 +150,8 @@ static NV_STATUS _kgspRpcRecvPoll(OBJGPU *, OBJRPC *, NvU32, NvU32);
 static NV_STATUS _kgspRpcDrainEvents(OBJGPU *, KernelGsp *, NvU32, NvU32, KernelGspRpcEventHandlerContext);
 static void      _kgspRpcIncrementTimeoutCountAndRateLimitPrints(OBJGPU *, OBJRPC *);
 
+static NvBool _kgspIsExternalGpuSurpriseRemoval(OBJGPU *);
+
 static NV_STATUS _kgspAllocSimAccessBuffer(OBJGPU *pGpu, KernelGsp *pKernelGsp);
 static void _kgspFreeSimAccessBuffer(OBJGPU *pGpu, KernelGsp *pKernelGsp);
 
@@ -303,11 +305,13 @@ _kgspRpcSanityCheck(OBJGPU *pGpu, KernelGsp *pKernelGsp, OBJRPC *pRpc)
         pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
     {
         NV_PRINTF(LEVEL_INFO, "GPU lost, skipping RPC\n");
+        pRpc->bQuietPrints = NV_TRUE;
         return NV_ERR_GPU_IS_LOST;
     }
     if (osIsGpuShutdown(pGpu))
     {
         NV_PRINTF(LEVEL_INFO, "GPU shutdown, skipping RPC\n");
+        pRpc->bQuietPrints = NV_TRUE;
         return NV_ERR_GPU_IS_LOST;
     }
     if (!gpuIsGpuFullPowerForPmResume(pGpu))
@@ -706,9 +710,15 @@ kgspRcAndNotifyAllChannels_IMPL
     CHANNEL_ITERATOR  chanIt;
     RMTIMEOUT         timeout;
 
-    NV_PRINTF(LEVEL_ERROR, "RC all %schannels for critical error %d.\n",
-              bSkipKernelChannels ? MAKE_NV_PRINTF_STR("user ") : MAKE_NV_PRINTF_STR(""),
-              exceptType);
+    //
+    // Suppress noisy logging for expected external GPU surprise removal.
+    //
+    if (!_kgspIsExternalGpuSurpriseRemoval(pGpu))
+    {
+        NV_PRINTF(LEVEL_ERROR, "RC all %schannels for critical error %d.\n",
+                  bSkipKernelChannels ? MAKE_NV_PRINTF_STR("user ") : MAKE_NV_PRINTF_STR(""),
+                  exceptType);
+    }
 
     // Pass 1: halt all channels.
     kfifoGetChannelIterator(pGpu, pKernelFifo, &chanIt, INVALID_RUNLIST_ID);
@@ -2041,6 +2051,20 @@ kgspLogRpcDebugInfoToProtobuf
     prbEncNestedEnd(pProtobufData);
 }
 
+/*!
+ * Check if this is an expected external GPU surprise removal.
+ * Used to suppress noisy debug output during normal eGPU hot-unplug.
+ */
+static NvBool
+_kgspIsExternalGpuSurpriseRemoval
+(
+    OBJGPU *pGpu
+)
+{
+    return pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_EXTERNAL_GPU) &&
+           pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST);
+}
+
 void
 kgspLogRpcDebugInfo
 (
@@ -2055,6 +2079,15 @@ kgspLogRpcDebugInfo
     NvU32  historyEntry;
     NvU64  activeData[2];
     const NvU32 rpcEntriesToLog = (RPC_HISTORY_DEPTH > 8) ? 8 : RPC_HISTORY_DEPTH;
+
+    //
+    // Suppress detailed RPC debug output for expected external GPU surprise removal.
+    // This keeps the log clean during normal Thunderbolt eGPU hot-unplug.
+    //
+    if (_kgspIsExternalGpuSurpriseRemoval(pGpu))
+    {
+        return;
+    }
 
     _kgspGetActiveRpcDebugData(pRpc, pMsgHdr->function,
                                &activeData[0], &activeData[1]);
@@ -2109,6 +2142,15 @@ _kgspLogXid119
     char  durationUnitsChar;
     KernelGsp *pKernelGsp = GPU_GET_KERNEL_GSP(pGpu);
     KernelFalcon *pKernelFlcn = staticCast(pKernelGsp, KernelFalcon);
+
+    //
+    // Suppress Xid 119 logging for expected external GPU surprise removal.
+    // During normal Thunderbolt eGPU hot-unplug, RPC timeouts are expected.
+    //
+    if (_kgspIsExternalGpuSurpriseRemoval(pGpu))
+    {
+        return;
+    }
 
     if (pRpc->timeoutCount == 1)
     {
@@ -2182,6 +2224,16 @@ _kgspLogRpcSanityCheckFailure
     RpcHistoryEntry *pHistoryEntry = &pRpc->rpcHistory[pRpc->rpcHistoryCurrent];
 
     NV_ASSERT(expectedFunc == pHistoryEntry->function);
+
+    //
+    // Suppress noisy output for expected external GPU surprise removal.
+    // For normal Thunderbolt eGPU hot-unplug, we don't need the full
+    // RPC debug dump and stack trace - the GPU is simply gone.
+    //
+    if (_kgspIsExternalGpuSurpriseRemoval(pGpu))
+    {
+        return;
+    }
 
     NV_PRINTF(LEVEL_ERROR,
               "GPU%d sanity check failed 0x%x waiting for RPC response from GSP. Expected function %d (%s) sequence %u (0x%llx 0x%llx).\n",
