@@ -2438,6 +2438,11 @@ NVDpyIdList nvRmGetConnectedDpys(const NVDispEvoRec *pDispEvo,
     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
     NvU32 ret;
 
+    /* Skip hardware access if GPU has been lost (e.g., Thunderbolt unplug) */
+    if (pDevEvo->gpuLost) {
+        return nvEmptyDpyIdList();
+    }
+
     if (pDevEvo->displaylessHw) {
         return DisplaylessRmGetConnectedDpys(pDispEvo, dpyIdList);
     }
@@ -3475,6 +3480,15 @@ NvBool nvRMSyncEvoChannel(
     NvU32 errorToken)
 {
     NvBool ret = TRUE;
+
+    /*
+     * Skip channel sync if the GPU has been lost (e.g., Thunderbolt eGPU
+     * surprise removal). The DMA control registers are invalid and would
+     * cause a crash.
+     */
+    if (pDevEvo->gpuLost) {
+        return FALSE;
+    }
 
     if (pChannel) {
         NvU32 sd;
