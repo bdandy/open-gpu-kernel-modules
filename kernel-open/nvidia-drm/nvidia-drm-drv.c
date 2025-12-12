@@ -863,6 +863,13 @@ static void nv_drm_dev_unload(struct drm_device *dev)
         NV_DRM_DEV_LOG_INFO(nv_dev,
             "Surprise removal detected, skipping hardware access");
 
+        /*
+         * Wake up any processes waiting on flip events - they will never
+         * complete since the GPU is gone. This prevents lockups when
+         * applications are actively using the GPU during hot-unplug.
+         */
+        wake_up_all(&nv_dev->flip_event_wq);
+
         cancel_delayed_work_sync(&nv_dev->hotplug_event_work);
         mutex_lock(&nv_dev->lock);
 
@@ -2252,6 +2259,12 @@ void nv_drm_remove(NvU32 gpuId)
             NV_DRM_DEV_LOG_INFO(nv_dev,
                 "PCI channel offline - surprise removal detected");
             nv_dev->inSurpriseRemoval = NV_TRUE;
+
+            /*
+             * Wake up any processes waiting on flip events or other GPU
+             * operations. These will never complete since the GPU is gone.
+             */
+            wake_up_all(&nv_dev->flip_event_wq);
         }
 
         drm_dev_unplug(nv_dev->dev);
