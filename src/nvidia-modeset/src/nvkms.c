@@ -1402,6 +1402,17 @@ static NvBool AllocDevice(struct NvKmsPerOpen *pOpen,
         pDevEvo->allocRefCnt = 1;
         nvFreeDevEvo(pDevEvo);
         pDevEvo = NULL;
+
+        /*
+         * After cleaning up a gpuLost device, reinitialize the global RM
+         * client handle. RM may have invalidated internal state when the
+         * GPU was lost, causing subsequent API calls to fail with
+         * NV_ERR_INVALID_OBJECT_HANDLE.
+         */
+        if (!nvReinitializeGlobalClientAfterGpuLost()) {
+            pParams->reply.status = NVKMS_ALLOC_DEVICE_STATUS_FATAL_ERROR;
+            return FALSE;
+        }
     }
 
     if (pDevEvo == NULL) {
@@ -1635,6 +1646,16 @@ static void DisableRemainingVblankSemControls(
 static void FreeDeviceReference(struct NvKmsPerOpen *pOpen,
                                 struct NvKmsPerOpenDev *pOpenDev)
 {
+    /*
+     * If the pDevEvo is NULL, the device was lost (surprise removal) and
+     * already freed. Just clean up the per-open structures without trying
+     * to access the device or do any hardware operations.
+     */
+    if (pOpenDev->pDevEvo == NULL) {
+        nvFreePerOpenDev(pOpen, pOpenDev);
+        return;
+    }
+
     /* Disable all client-owned vblank sync objects that still exist. */
     DisableRemainingVblankSyncObjects(pOpen, pOpenDev);
 
@@ -5327,6 +5348,33 @@ void nvRevokeDevice(NVDevEvoPtr pDevEvo)
     }
 }
 
+/*
+ * Invalidate all pOpenDev->pDevEvo references to the given device.
+ * This is used during GPU lost (surprise removal) cleanup to prevent
+ * use-after-free when the pDevEvo is freed but pOpenDev structures
+ * still exist and will be cleaned up later during nvKmsClose.
+ */
+void nvInvalidateDeviceReferences(NVDevEvoPtr pDevEvo)
+{
+    struct NvKmsPerOpen *pOpen;
+
+    if (pDevEvo == NULL) {
+        return;
+    }
+
+    nvListForEachEntry(pOpen, &perOpenIoctlList, perOpenIoctlListEntry) {
+        struct NvKmsPerOpenDev *pOpenDev = DevEvoToOpenDev(pOpen, pDevEvo);
+        if (pOpenDev != NULL) {
+            /*
+             * Set pDevEvo to NULL to indicate the device is gone.
+             * FreeDeviceReference will check for this and skip
+             * hardware access.
+             */
+            pOpenDev->pDevEvo = NULL;
+        }
+    }
+}
+
 /*!
  * Open callback.
  *
@@ -6354,6 +6402,51 @@ void nvKmsReinitializeGlobalClient(void)
     nvEvoGlobal.rmSmgContext.clientHandle = nvEvoGlobal.clientHandle;
 
     nvEvoLog(EVO_LOG_INFO, "Reinitialized global client after GPU surprise removal");
+}
+
+/*
+ * Reinitialize the global RM client handle after a GPU was lost.
+ * This is needed because RM may have invalidated internal state associated
+ * with the client when the GPU was lost. We free and reallocate the client
+ * to get a fresh state.
+ *
+ * This should only be called when the device list is empty (i.e., all
+ * gpuLost devices have been cleaned up) and before allocating a new device.
+ *
+ * Returns TRUE on success, FALSE on failure.
+ */
+NvBool nvReinitializeGlobalClientAfterGpuLost(void)
+{
+    NvU32 ret;
+
+    /* Only reinitialize if we have a client handle */
+    if (nvEvoGlobal.clientHandle == 0) {
+        return TRUE;
+    }
+
+    nvEvoLog(EVO_LOG_INFO, "Reinitializing global client after GPU lost");
+
+    /* Free the old client handle */
+    nvRmApiFree(nvEvoGlobal.clientHandle, nvEvoGlobal.clientHandle,
+                nvEvoGlobal.clientHandle);
+    nvEvoGlobal.clientHandle = 0;
+
+    /* Allocate a new client handle */
+    ret = nvRmApiAlloc(NV01_NULL_OBJECT,
+                       NV01_NULL_OBJECT,
+                       NV01_NULL_OBJECT,
+                       NV01_ROOT,
+                       &nvEvoGlobal.clientHandle);
+
+    if (ret != NVOS_STATUS_SUCCESS) {
+        nvEvoLog(EVO_LOG_ERROR, "Failed to reinitialize global client");
+        return FALSE;
+    }
+
+    /* Update RM context */
+    nvEvoGlobal.rmSmgContext.clientHandle = nvEvoGlobal.clientHandle;
+
+    return TRUE;
 }
 
 /*
