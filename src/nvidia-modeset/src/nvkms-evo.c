@@ -8904,8 +8904,6 @@ NvBool nvFreeDevEvo(NVDevEvoPtr pDevEvo)
 
 free_software_resources:
     {
-        NvBool wasGpuLost = pDevEvo->gpuLost;
-
         nvkms_free_timer(pDevEvo->consoleRestoreTimer);
         pDevEvo->consoleRestoreTimer = NULL;
 
